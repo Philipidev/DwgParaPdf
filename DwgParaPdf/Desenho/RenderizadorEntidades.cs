@@ -45,10 +45,10 @@ internal sealed class RenderizadorEntidades
     private const double EspessuraPadraoMm = 0.25;
     private const double EspessuraMinimaPt = 0.12;
     private const double AlturaCapitalArial = 0.716; // altura das maiúsculas / tamanho da fonte
-    private const int LimiteLinhasHachura = 40_000;
     private const int ProfundidadeMaxima = 12;
 
     private readonly XGraphics _gfx;
+    private readonly ParametrosLod _lod;
     private readonly List<string> _avisos;
     private readonly double _ltscale;
     private readonly double _alturaTextoPadrao;
@@ -64,9 +64,10 @@ internal sealed class RenderizadorEntidades
     public int EntidadesComErro { get; private set; }
     public IReadOnlyDictionary<string, int> TiposNaoSuportados => _tiposNaoSuportados;
 
-    public RenderizadorEntidades(XGraphics gfx, CadDocument doc, List<string> avisos)
+    public RenderizadorEntidades(XGraphics gfx, CadDocument doc, List<string> avisos, ParametrosLod? lod = null)
     {
         _gfx = gfx;
+        _lod = lod ?? ParametrosLod.De(NivelDetalhe.Alto);
         _avisos = avisos;
         _ltscale = doc.Header?.LineTypeScale > 0 ? doc.Header.LineTypeScale : 1;
         _alturaTextoPadrao = doc.Header?.TextHeightDefault > 0 ? doc.Header.TextHeightDefault : 2.5;
@@ -166,6 +167,10 @@ internal sealed class RenderizadorEntidades
 
             case MText m:
                 MTexto(m, ctx);
+                return;
+
+            case Wipeout mascara:
+                Mascara(mascara, ctx);
                 return;
 
             case TableEntity tabela:
@@ -282,7 +287,7 @@ internal sealed class RenderizadorEntidades
             // padrão não suportado: cai no preenchimento leve
         }
 
-        if (linhas is { Count: > 0 } && linhas.Count <= LimiteLinhasHachura)
+        if (linhas is { Count: > 0 } && linhas.Count <= _lod.LimiteLinhasHachura)
         {
             var estado = _gfx.Save();
             try
@@ -317,6 +322,40 @@ internal sealed class RenderizadorEntidades
         EntidadesDesenhadas++;
     }
 
+    /// <summary>
+    /// WIPEOUT: polígono branco que esconde o que foi desenhado antes dele (mesma ordem de desenho do arquivo).
+    /// Os vértices vêm em coordenadas de imagem: origem no canto superior esquerdo, Y para baixo, deslocados de −0,5;
+    /// o mundo é InsertPoint + px·U + (altura − py)·V, com U/V os vetores de um pixel e a imagem de 1×1 pixel.
+    /// </summary>
+    private void Mascara(CadWipeoutBase w, ContextoRender ctx)
+    {
+        var vertices = w.ClipBoundaryVertices;
+        if (vertices is null || vertices.Count < 2) return;
+
+        var alturaPx = w.Size.Y > 0 ? w.Size.Y : 1;
+        IEnumerable<XY> imagem = vertices;
+        if (vertices.Count == 2)
+        {
+            var a = vertices[0]; var b = vertices[1];
+            imagem = new[] { a, new XY(b.X, a.Y), b, new XY(a.X, b.Y) };
+        }
+
+        var mundo = imagem.Select(p =>
+        {
+            var px = p.X + 0.5;
+            var py = p.Y + 0.5;
+            return new XYZ(
+                w.InsertPoint.X + px * w.UVector.X + (alturaPx - py) * w.VVector.X,
+                w.InsertPoint.Y + px * w.UVector.Y + (alturaPx - py) * w.VVector.Y,
+                0);
+        }).ToList();
+
+        var pontos = ParaPagina(mundo, ctx);
+        if (pontos.Length < 3) return;
+        _gfx.DrawPolygon(Pincel(XColors.White), pontos, XFillMode.Winding);
+        EntidadesDesenhadas++;
+    }
+
     private void Preencher(IReadOnlyList<XYZ> mundo, Entity e, ContextoRender ctx)
     {
         var pontos = ParaPagina(mundo, ctx);
@@ -329,6 +368,7 @@ internal sealed class RenderizadorEntidades
     {
         var pontos = ParaPagina(mundo, ctx);
         if (pontos.Length < 2) return;
+        if (_lod.MinimoEntidadePt > 0 && pontos.Length <= 64 && ExtensaoMenorQue(pontos, _lod.MinimoEntidadePt)) return; // invisível nesse nível
 
         var larguraPt = larguraMundo > 0
             ? Math.Max(EspessuraMinimaPt, larguraMundo * ctx.M.EscalaMedia)
@@ -343,9 +383,11 @@ internal sealed class RenderizadorEntidades
     /// <summary>Traça um contorno já em coordenadas do espaço (usado pelo paginador para bordas de viewport).</summary>
     public void Contorno(IReadOnlyList<XYZ> pontosEspaco, Entity dona, ContextoRender ctx) => Tracar(pontosEspaco, true, dona, ctx);
 
-    private static XPoint[] ParaPagina(IReadOnlyList<XYZ> mundo, ContextoRender ctx)
+    /// <summary>Leva pontos do mundo à página, remove coincidentes, simplifica (Douglas-Peucker) e arredonda conforme o nível de detalhe.</summary>
+    private XPoint[] ParaPagina(IReadOnlyList<XYZ> mundo, ContextoRender ctx)
     {
         var lista = new List<XPoint>(mundo.Count);
+        var minimo = Math.Max(0.02, _lod.ToleranciaPt * 0.5);
         foreach (var p in mundo)
         {
             var q = ctx.M.Aplicar(p);
@@ -353,17 +395,72 @@ internal sealed class RenderizadorEntidades
             if (lista.Count > 0)
             {
                 var ult = lista[^1];
-                if (Math.Abs(ult.X - q.X) < 0.02 && Math.Abs(ult.Y - q.Y) < 0.02) continue;
+                if (Math.Abs(ult.X - q.X) < minimo && Math.Abs(ult.Y - q.Y) < minimo) continue;
             }
             lista.Add(q);
+        }
+
+        if (_lod.ToleranciaPt > 0.05 && lista.Count > 2)
+            lista = Simplificar(lista, _lod.ToleranciaPt);
+
+        if (_lod.ArredondamentoPt > 0)
+        {
+            var f = 1 / _lod.ArredondamentoPt;
+            for (var i = 0; i < lista.Count; i++)
+                lista[i] = new XPoint(Math.Round(lista[i].X * f) / f, Math.Round(lista[i].Y * f) / f);
         }
         return lista.ToArray();
     }
 
-    private static int Segmentos(double raioMundo, double varredura, ContextoRender ctx)
+    /// <summary>Douglas-Peucker iterativo: mantém os vértices que se afastam mais que a tolerância da corda.</summary>
+    private static List<XPoint> Simplificar(List<XPoint> pontos, double tolerancia)
+    {
+        var manter = new bool[pontos.Count];
+        manter[0] = manter[^1] = true;
+        var pilha = new Stack<(int Ini, int Fim)>();
+        pilha.Push((0, pontos.Count - 1));
+        var tol2 = tolerancia * tolerancia;
+
+        while (pilha.Count > 0)
+        {
+            var (ini, fim) = pilha.Pop();
+            if (fim - ini < 2) continue;
+            var a = pontos[ini]; var b = pontos[fim];
+            var dx = b.X - a.X; var dy = b.Y - a.Y;
+            var len2 = dx * dx + dy * dy;
+            var maxDist2 = -1.0; var indice = -1;
+            for (var i = ini + 1; i < fim; i++)
+            {
+                var p = pontos[i];
+                double d2;
+                if (len2 < 1e-12) { var ex = p.X - a.X; var ey = p.Y - a.Y; d2 = ex * ex + ey * ey; }
+                else { var cruz = (p.X - a.X) * dy - (p.Y - a.Y) * dx; d2 = cruz * cruz / len2; }
+                if (d2 > maxDist2) { maxDist2 = d2; indice = i; }
+            }
+            if (maxDist2 > tol2 && indice > 0)
+            {
+                manter[indice] = true;
+                pilha.Push((ini, indice));
+                pilha.Push((indice, fim));
+            }
+        }
+
+        var saida = new List<XPoint>(pontos.Count);
+        for (var i = 0; i < pontos.Count; i++) if (manter[i]) saida.Add(pontos[i]);
+        return saida;
+    }
+
+    private static bool ExtensaoMenorQue(XPoint[] pontos, double limite)
+    {
+        double minX = double.MaxValue, minY = double.MaxValue, maxX = double.MinValue, maxY = double.MinValue;
+        foreach (var p in pontos) { minX = Math.Min(minX, p.X); maxX = Math.Max(maxX, p.X); minY = Math.Min(minY, p.Y); maxY = Math.Max(maxY, p.Y); }
+        return maxX - minX < limite && maxY - minY < limite;
+    }
+
+    private int Segmentos(double raioMundo, double varredura, ContextoRender ctx)
     {
         var comprimentoPt = Math.Abs(varredura) * Math.Abs(raioMundo) * ctx.M.EscalaMedia;
-        var n = (int)Math.Ceiling(comprimentoPt / 1.5);
+        var n = (int)Math.Ceiling(comprimentoPt / _lod.PassoArcoPt);
         return Math.Clamp(n, varredura > Math.PI ? 12 : 4, 720);
     }
 
@@ -431,7 +528,7 @@ internal sealed class RenderizadorEntidades
 
         var altura = dados.TextHeight > 0 ? dados.TextHeight : _alturaTextoPadrao;
         var quadro = Quadro(dados.TextLocation, dados.TextRotation, ctx);
-        LinhasDeTexto(quadro, ml.TextStyle, altura, dados.LineSpacingFactor, texto.Split('\n'), AttachmentPointType.MiddleLeft, 0, Cor(ml, ctx));
+        LinhasDeTexto(quadro, ml.TextStyle, altura, dados.LineSpacingFactor, texto.Split('\n'), AttachmentPointType.MiddleLeft, 0, CorTexto(ml, ctx));
     }
 
     // ------------------------------------------------------------------ texto
@@ -506,7 +603,7 @@ internal sealed class RenderizadorEntidades
             _ => 0,
         };
 
-        DesenharTextoLocal(quadro, fonte, Pincel(Cor(t, ctx)), s, dx, dy, estiramento, t.ObliqueAngle);
+        DesenharTextoLocal(quadro, fonte, Pincel(CorTexto(t, ctx)), s, dx, dy, estiramento, t.ObliqueAngle);
     }
 
     private void MTexto(MText m, ContextoRender ctx)
@@ -521,7 +618,7 @@ internal sealed class RenderizadorEntidades
             rotacao = Math.Atan2(direcao.Y, direcao.X);
 
         var quadro = Quadro(m.InsertPoint, rotacao, ctx);
-        LinhasDeTexto(quadro, m.Style, altura, m.LineSpacing, limpo.Split('\n'), m.AttachmentPoint, m.RectangleWidth, Cor(m, ctx));
+        LinhasDeTexto(quadro, m.Style, altura, m.LineSpacing, limpo.Split('\n'), m.AttachmentPoint, m.RectangleWidth, CorTexto(m, ctx));
     }
 
     /// <summary>Desenha um bloco de linhas (MTEXT, MLEADER) com quebra por largura e ancoragem pelo ponto de fixação.</summary>
@@ -535,22 +632,33 @@ internal sealed class RenderizadorEntidades
         // largura de quebra menor que um caractere é lixo (arquivos trazem 2e-10): sem quebra
         var larguraMaxLocal = larguraCaixaMundo >= alturaMundo * 0.5 ? larguraCaixaMundo * quadro.EscalaY : 0;
 
-        var linhas = new List<string>();
+        // A fonte substituta nunca tem exatamente a largura da original; uma linha que estoura a caixa em até 15 %
+        // era uma linha só no AutoCAD: comprime-a horizontalmente em vez de quebrar (senão cada linha vira duas).
+        const double Folga = 1.15;
+        var linhas = new List<(string Texto, double Compressao)>();
         foreach (var paragrafo in paragrafos)
         {
-            if (larguraMaxLocal <= 0 || _gfx.MeasureString(paragrafo, fonte).Width <= larguraMaxLocal) { linhas.Add(paragrafo); continue; }
+            var larguraParagrafo = _gfx.MeasureString(paragrafo, fonte).Width;
+            if (larguraMaxLocal <= 0 || larguraParagrafo <= larguraMaxLocal) { linhas.Add((paragrafo, 1)); continue; }
+            if (larguraParagrafo <= larguraMaxLocal * Folga) { linhas.Add((paragrafo, larguraMaxLocal / larguraParagrafo)); continue; }
+
             var atual = string.Empty;
             foreach (var palavra in paragrafo.Split(' ', StringSplitOptions.RemoveEmptyEntries))
             {
                 var tentativa = atual.Length == 0 ? palavra : atual + " " + palavra;
-                if (atual.Length > 0 && _gfx.MeasureString(tentativa, fonte).Width > larguraMaxLocal)
+                if (atual.Length > 0 && _gfx.MeasureString(tentativa, fonte).Width > larguraMaxLocal * Folga)
                 {
-                    linhas.Add(atual);
+                    var w = _gfx.MeasureString(atual, fonte).Width;
+                    linhas.Add((atual, w > larguraMaxLocal ? larguraMaxLocal / w : 1));
                     atual = palavra;
                 }
                 else atual = tentativa;
             }
-            if (atual.Length > 0) linhas.Add(atual);
+            if (atual.Length > 0)
+            {
+                var w = _gfx.MeasureString(atual, fonte).Width;
+                linhas.Add((atual, w > larguraMaxLocal ? larguraMaxLocal / w : 1));
+            }
         }
         if (linhas.Count == 0) return;
 
@@ -565,14 +673,16 @@ internal sealed class RenderizadorEntidades
         var pincel = Pincel(cor);
         for (var i = 0; i < linhas.Count; i++)
         {
-            var largura = _gfx.MeasureString(linhas[i], fonte).Width;
+            var (texto, compressao) = linhas[i];
+            var largura = _gfx.MeasureString(texto, fonte).Width * compressao;
+            // dx é medido no espaço local antes do estiramento: divide pela compressão da linha
             var dx = fixacao switch
             {
-                AttachmentPointType.TopCenter or AttachmentPointType.MiddleCenter or AttachmentPointType.BottomCenter => -largura / 2,
-                AttachmentPointType.TopRight or AttachmentPointType.MiddleRight or AttachmentPointType.BottomRight => -largura,
+                AttachmentPointType.TopCenter or AttachmentPointType.MiddleCenter or AttachmentPointType.BottomCenter => -largura / 2 / compressao,
+                AttachmentPointType.TopRight or AttachmentPointType.MiddleRight or AttachmentPointType.BottomRight => -largura / compressao,
                 _ => 0,
             };
-            DesenharTextoLocal(quadro, fonte, pincel, linhas[i], dx, topo + alturaPt + i * passoLinha, estiramento, 0);
+            DesenharTextoLocal(quadro, fonte, pincel, texto, dx, topo + alturaPt + i * passoLinha, estiramento * compressao, 0);
         }
     }
 
@@ -613,7 +723,7 @@ internal sealed class RenderizadorEntidades
         catch
         {
             _familiasIndisponiveis.Add(familia);
-            if (_avisos.Count < 200) _avisos.Add($"Fonte '{familia}' indisponível; usando {GeradorPdf.FamiliaFonte}.");
+            if (_avisos.Count < 200 && familia != FamiliaFonteEstreita) _avisos.Add($"Fonte '{familia}' indisponível; usando {GeradorPdf.FamiliaFonte}.");
             familia = GeradorPdf.FamiliaFonte;
             chave = (familia + "|" + (int)estiloFonte, tamanho);
             if (_fontes.TryGetValue(chave, out pronta)) return pronta;
@@ -645,8 +755,13 @@ internal sealed class RenderizadorEntidades
         var arquivo = estilo.Filename;
         if (!string.IsNullOrWhiteSpace(arquivo) && arquivo.EndsWith(".ttf", StringComparison.OrdinalIgnoreCase))
             return (Path.GetFileNameWithoutExtension(arquivo), xEstilo);
-        return (GeradorPdf.FamiliaFonte, xEstilo);
+
+        // fontes SHX (simplex, romans, txt, isocp...) são de traço simples e estreitas: Arial faria o MTEXT quebrar em
+        // mais linhas e invadir o que está abaixo. Arial Narrow tem largura de caractere próxima; cai em Arial se faltar.
+        return (FamiliaFonteEstreita, xEstilo);
     }
+
+    private const string FamiliaFonteEstreita = "Arial Narrow";
 
     // ------------------------------------------------------------------ estilo
 
@@ -661,7 +776,23 @@ internal sealed class RenderizadorEntidades
         return true;
     }
 
-    private static XColor Cor(Entity e, ContextoRender ctx)
+    /// <summary>Cor de geometria (traços e preenchimentos), já tratada pelo modo de cores.</summary>
+    private XColor Cor(Entity e, ContextoRender ctx) => _lod.Cores switch
+    {
+        ModoCores.Mono => XColors.Black,
+        ModoCores.Tudo => Contrastar(CorBruta(e, ctx)),
+        _ => CorBruta(e, ctx),
+    };
+
+    /// <summary>Cor de texto: escurecida quando clara demais para o papel branco (modos texto e tudo), preta em mono.</summary>
+    private XColor CorTexto(Entity e, ContextoRender ctx) => _lod.Cores switch
+    {
+        ModoCores.Mono or ModoCores.TextoPreto => XColors.Black,
+        ModoCores.Original => CorBruta(e, ctx),
+        _ => Contrastar(CorBruta(e, ctx)),
+    };
+
+    private static XColor CorBruta(Entity e, ContextoRender ctx)
     {
         var c = e.Color;
         if (c.IsByBlock) return ctx.CorPai ?? XColors.Black;
@@ -673,6 +804,44 @@ internal sealed class RenderizadorEntidades
             return CorDe(camada.Color);
         }
         return CorDe(c);
+    }
+
+    /// <summary>
+    /// Escurece cores claras demais para papel branco mantendo o matiz: amarelo vira oliva, ciano vira petróleo,
+    /// cinza claro vira cinza escuro. Cores já escuras (vermelho, azul, magenta, preto) não mudam.
+    /// </summary>
+    internal static XColor Contrastar(XColor cor)
+    {
+        double r = cor.R / 255.0, g = cor.G / 255.0, b = cor.B / 255.0;
+        var luminancia = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+        if (luminancia <= 0.45) return cor;
+
+        // HSL: baixa a luminosidade para 0,28 preservando matiz e saturação
+        var max = Math.Max(r, Math.Max(g, b)); var min = Math.Min(r, Math.Min(g, b));
+        var l = (max + min) / 2;
+        var d = max - min;
+        double h = 0, s = 0;
+        if (d > 1e-9)
+        {
+            s = d / (1 - Math.Abs(2 * l - 1));
+            if (max == r) h = ((g - b) / d + (g < b ? 6 : 0)) / 6;
+            else if (max == g) h = ((b - r) / d + 2) / 6;
+            else h = ((r - g) / d + 4) / 6;
+        }
+        const double novoL = 0.28;
+        var c2 = (1 - Math.Abs(2 * novoL - 1)) * s;
+        var x = c2 * (1 - Math.Abs(h * 6 % 2 - 1));
+        var m = novoL - c2 / 2;
+        var (r1, g1, b1) = (h * 6) switch
+        {
+            < 1 => (c2, x, 0.0),
+            < 2 => (x, c2, 0.0),
+            < 3 => (0.0, c2, x),
+            < 4 => (0.0, x, c2),
+            < 5 => (x, 0.0, c2),
+            _ => (c2, 0.0, x),
+        };
+        return XColor.FromArgb((int)Math.Round((r1 + m) * 255), (int)Math.Round((g1 + m) * 255), (int)Math.Round((b1 + m) * 255));
     }
 
     private static XColor CorDe(Color c)

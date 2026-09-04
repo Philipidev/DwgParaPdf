@@ -21,16 +21,19 @@ de comando quanto como biblioteca .NET.
 3. [Uso pela linha de comando](#uso-pela-linha-de-comando)
 4. [Uso como biblioteca](#uso-como-biblioteca)
 5. [Modos de saída](#modos-de-saída)
-6. [O que é renderizado](#o-que-é-renderizado)
-7. [O que é extraído como texto](#o-que-é-extraído-como-texto)
-8. [Como o enquadramento funciona](#como-o-enquadramento-funciona)
-9. [Limitações conhecidas](#limitações-conhecidas)
-10. [Pendências e roteiro](#pendências-e-roteiro)
-11. [Solução de problemas](#solução-de-problemas)
-12. [Estrutura do projeto](#estrutura-do-projeto)
-13. [Testes e como validar mudanças](#testes-e-como-validar-mudanças)
-14. [Contribuindo](#contribuindo)
-15. [Licenças](#licenças)
+6. [Nível de detalhe (`--lod`)](#nível-de-detalhe---lod)
+7. [Cores sobre papel branco (`--cores`)](#cores-sobre-papel-branco---cores)
+8. [O que é renderizado](#o-que-é-renderizado)
+9. [O que é extraído como texto](#o-que-é-extraído-como-texto)
+10. [Como o enquadramento funciona](#como-o-enquadramento-funciona)
+11. [Limitações conhecidas](#limitações-conhecidas)
+12. [Pendências e roteiro](#pendências-e-roteiro)
+13. [Solução de problemas](#solução-de-problemas)
+14. [Estrutura do projeto](#estrutura-do-projeto)
+15. [Testes e como validar mudanças](#testes-e-como-validar-mudanças)
+16. [Contribuindo](#contribuindo)
+17. [Histórico de versões](#histórico-de-versões)
+18. [Licenças](#licenças)
 
 ---
 
@@ -127,6 +130,8 @@ DwgParaPdf <entrada> [-o <saida.pdf>] [--modo desenho|texto|ambos] [--so-modelo]
   --modo         desenho (padrão) | texto | ambos  (ver "Modos de saída")
   --so-modelo    no modo desenho, só a página do espaço do modelo
   --so-layouts   no modo desenho, só as páginas dos layouts de papel
+  --lod          nível de detalhe da geometria: alto (padrão) | medio | baixo  (ver "Nível de detalhe")
+  --cores        original | texto (padrão) | texto-preto | tudo | mono  (ver "Cores sobre papel branco")
   --txt          grava também um .txt (Markdown leve) com o texto extraído em ordem de leitura
   --tsv          grava também um .tsv com cada texto e sua posição (espaço, tipo, camada, x, y, altura)
   --sem-cotas    no texto extraído, ignora entidades DIMENSION
@@ -215,6 +220,37 @@ e `DeUrl` existem para quem quer ser explícito.
 
 Em qualquer modo `ResultadoConversao.Texto` e `Documento` ficam disponíveis.
 
+## Nível de detalhe (`--lod`)
+
+Desenhos densos (topografia com milhares de curvas de nível, hachuras de padrão em seções) geram PDFs de
+dezenas ou centenas de MB. O nível de detalhe reduz a geometria **sem tocar no texto**, que é sempre gravado
+integralmente (é o que interessa para busca e RAG).
+
+| Nível | Polilinhas | Arcos | Hachuras de padrão | Coordenadas | Entidades minúsculas |
+|---|---|---|---|---|---|
+| `alto` (padrão) | só vértices coincidentes removidos | 1 segmento a cada 1,5 pt | até 40 mil linhas, senão preenchimento translúcido | 4 decimais | mantidas |
+| `medio` | simplificadas (Douglas-Peucker) a 0,3 pt | 1 a cada 3 pt | até 8 mil linhas | 1 decimal | mantidas |
+| `baixo` | simplificadas a 0,8 pt | 1 a cada 6 pt | sempre preenchimento translúcido | 1 decimal | menores que 0,8 pt somem |
+
+A tolerância é medida em pontos **da página** (1 pt = 0,35 mm): em `medio` nada se move mais que 0,1 mm no
+papel, invisível a olho e ainda fiel com zoom moderado. Hachuras sólidas, cores, espessuras, tracejados,
+cotas, blocos e viewports não mudam. Use `--so-layouts` junto quando as pranchas já mostram tudo que importa:
+a página do modelo costuma duplicar a geometria.
+
+## Cores sobre papel branco (`--cores`)
+
+O AutoCAD desenha em fundo escuro, então amarelo, ciano e verde-claro são comuns e somem no papel branco.
+
+| Modo | Efeito |
+|---|---|
+| `original` | Cores do arquivo; só branco/índice 7 vira preto |
+| `texto` (padrão) | Textos claros demais (luminância > 0,45) são escurecidos **mantendo o matiz**: amarelo vira oliva, ciano vira petróleo, cinza claro vira cinza escuro. Linhas, hachuras e legendas ficam como estão |
+| `texto-preto` | Todo texto preto; geometria intacta |
+| `tudo` | O mesmo escurecimento de `texto` aplicado também à geometria |
+| `mono` | Tudo preto, equivalente ao `monochrome.ctb` do AutoCAD |
+
+Para RAG e leitura, `texto` costuma bastar; `mono` é a escolha para impressão em preto e branco.
+
 ## O que é renderizado
 
 | Entidade | Como |
@@ -231,12 +267,16 @@ Em qualquer modo `ResultadoConversao.Texto` e `Documento` ficam disponíveis.
 | DIMENSION | Pelo bloco anônimo da cota (linhas, setas e texto) |
 | LEADER, MLEADER | Linhas de chamada e texto do MLEADER |
 | TABLE | Pelo bloco gráfico da tabela |
-| VIEWPORT (em layouts) | Modelo recortado ao retângulo ou ao contorno poligonal; camadas congeladas por viewport; *twist*; borda só se a camada da viewport for plotável |
+| VIEWPORT (em layouts) | Modelo recortado ao retângulo ou ao contorno poligonal; alvo da vista (`ViewTarget`), centro, escala e *twist*; camadas congeladas por viewport; borda só se a camada da viewport for plotável |
+| WIPEOUT | Máscara branca na ordem de desenho do arquivo (esconde o que foi desenhado antes) |
 
 Propriedades: cores ACI e true color (índice 7 e branco puro plotam preto sobre o papel branco); espessuras de
 linha em mm (ByLayer/ByBlock/padrão 0,25 mm); tipos de linha tracejados com LTSCALE e escala da entidade;
 camadas desligadas, congeladas, não plotáveis e `Defpoints` não saem; fontes TrueType instaladas pelo nome do
-arquivo do estilo, negrito/itálico pelos *flags* do estilo.
+arquivo do estilo, negrito/itálico pelos *flags* do estilo; fontes SHX (simplex, romans, txt, isocp) saem em
+**Arial Narrow**, cuja largura de caractere é próxima da original (Arial faria os blocos de notas quebrarem em
+mais linhas e invadirem o carimbo). Uma linha de MTEXT até 15 % mais larga que a caixa é comprimida em vez de
+quebrada, porque no AutoCAD ela cabia em uma linha.
 
 ## O que é extraído como texto
 
@@ -260,10 +300,12 @@ fique com pelo menos `AlturaTextoMinimaMm` (1,8 mm) no papel. Acima de A0 os vis
 ganho real, já que o PDF é vetorial.
 
 **Layouts.** A folha é a declarada nas configurações de plotagem (`PaperWidth`/`PaperHeight` em mm, com a
-rotação). As unidades do layout vêm de `PaperUnits` (mm ou polegadas). Se o tipo de plotagem é "layout" e o
-conteúdo cabe em 1:1, ele é posicionado pela margem imprimível; caso contrário (extensão, janela, tela) o
-conteúdo é ajustado à folha, como o AutoCAD faz com "ajustar ao papel". Layouts sem entidades e sem viewport
-ativa são omitidos. Folhas não declaradas ou absurdas (> 6 m) caem em A1.
+rotação). As unidades do layout vêm de `PaperUnits` (mm ou polegadas). A região enquadrada segue a ordem de
+confiança: janela de plotagem (`PlotType = Window`), extensão salva do layout pelo AutoCAD, e por último as
+caixas das entidades visíveis (MULTILEADER e WIPEOUT ilegíveis trazem caixas erradas). Se o tipo de plotagem é
+"layout" e o conteúdo cabe em 1:1, ele é posicionado pela margem imprimível; caso contrário o conteúdo é ajustado
+à folha, como o AutoCAD faz com "ajustar ao papel". Layouts sem entidades e sem viewport ativa são omitidos.
+Folhas não declaradas ou absurdas (> 6 m) caem em A1.
 
 ## Limitações conhecidas
 
@@ -272,20 +314,21 @@ Renderização:
 - **Sistema de coordenadas do objeto (OCS/extrusão)** não é aplicado: entidades com `Normal` diferente de +Z
   (ex.: arcos/círculos espelhados com normal −Z, blocos rotacionados em 3D) saem no lugar errado.
 - **REGION**, sólidos 3D, malhas e superfícies (geometria ACIS) não têm representação disponível: ignorados.
-- **WIPEOUT** não mascara o que está atrás; **imagens raster** e **OLE** não saem (por escolha: PDF só vetorial).
-- **Fontes SHX** (romans, simplex, isocp…) viram Arial: larguras e aparência diferem do AutoCAD. Fontes SHX
+- **Imagens raster** e **OLE** não saem (por escolha: PDF só vetorial).
+- **MULTILEADER** de alguns arquivos AutoCAD 2013 (AC1027) não é lido pela biblioteca ("Could not read
+  MULTILEADER"): esses textos de chamada somem. Aparece nos avisos.
+- **Fontes SHX** (romans, simplex, isocp…) viram Arial Narrow: aparência próxima, não idêntica. Fontes SHX
   grandes (asiáticas) não são tratadas.
 - **MTEXT** perde formatação interna: uma só fonte e cor por entidade; frações empilhadas saem como `a/b`;
   sublinhado, sobrelinha, campos (`%<\AcVar…>%`), colunas e fundo (máscara) não são reproduzidos.
-- **Estilos de plotagem** (CTB/STB) não são aplicados: as cores são as da tela, exceto 7/branco → preto.
-  Não há opção "monocromático" ainda.
+- **Estilos de plotagem** (CTB/STB) não são aplicados; `--cores` cobre os casos comuns (escurecer claros, mono).
 - **Tipos de linha complexos** (com formas ou texto embutido) saem só com os traços; `PSLTSCALE` é ignorado.
 - **Setas** de LEADER/MLEADER e o bloco de conteúdo do MLEADER não são desenhados.
 - **Ordem de desenho** (`SORTENTS`) é ignorada: a ordem é a do arquivo. Em layouts as entidades do papel são
   sempre desenhadas por cima das viewports.
 - **Viewports**: vistas 3D são renderizadas em planta (aviso emitido); sobreposições de propriedade de camada
   por viewport (cor/tipo de linha diferentes por viewport) não se aplicam; o sinal do *twist* não foi validado
-  com arquivo real.
+  com arquivo real (alvo da vista e centro foram validados).
 - **Blocos dinâmicos**: o estado de visibilidade atual não é avaliado (todas as entidades do bloco anônimo são
   desenhadas, o que costuma coincidir com o esperado).
 - **XREFs** não são resolvidas (o arquivo referenciado não é carregado).
@@ -310,10 +353,10 @@ Formato e ambiente:
 Em ordem aproximada de valor/esforço. Contribuições bem-vindas.
 
 1. **OCS/extrusão**: aplicar a matriz do vetor normal (Arbitrary Axis Algorithm) nas entidades 2D antes de renderizar.
-2. **WIPEOUT** como máscara branca (mapear `ClipBoundaryVertices` com `UVector`/`VVector`).
-3. **Opção monocromático** e leitura de CTB/STB (ao menos cor → cor/espessura da tabela).
-4. **MTEXT rico**: mudanças de fonte/cor inline, frações empilhadas de verdade, sublinhado, campos, colunas, máscara de fundo.
-5. **Mapa de fontes configurável** (ex.: `romans.shx → Liberation Sans Narrow`) e suporte a `.otf`/`.ttc`.
+2. **Leitura de CTB/STB** (cor → cor/espessura da tabela de plotagem).
+3. **MTEXT rico**: mudanças de fonte/cor inline, frações empilhadas de verdade, sublinhado, campos, colunas, máscara de fundo.
+4. **Mapa de fontes configurável** (ex.: `romans.shx → Liberation Sans Narrow` no Linux) e suporte a `.otf`/`.ttc`.
+5. **MULTILEADER AC1027**: contornar a falha de leitura da biblioteca (ou contribuir a correção no ACadSharp).
 6. **Sobreposições de camada por viewport** (VPLAYER) e tipos de linha com formas.
 7. **XREF**: resolver caminhos relativos e carregar arquivos referenciados.
 8. **Opções de página**: folha e escala explícitas para o modelo; desligar o filtro de outliers; margem por opção.
@@ -406,9 +449,11 @@ for i, pagina in enumerate(doc):
 
 Compare com a visualização do AutoCAD/TrueView ou com o PDF plotado por ele.
 
-O projeto foi validado com oito desenhos reais de AutoCAD (mapas cadastrais e de mobilidade urbana, formatos de
-prancha A1–A5, blocos de vegetação, desenho mecânico), de 0,1 a 19 MB. O maior (211 mil textos, 639 mil
-entidades) leva cerca de 25 s e gera 21 MB.
+O projeto foi validado com oito desenhos públicos de AutoCAD (mapas cadastrais e de mobilidade urbana, formatos
+de prancha A1–A5, blocos de vegetação, desenho mecânico), de 0,1 a 19 MB, e com 76 pranchas de engenharia
+(AutoCAD 2013, 0,8 a 48 MB, layouts de 1050 × 594 mm plotados por janela, topografia densa, hachuras de seção).
+O maior mapa (211 mil textos, 639 mil entidades) leva cerca de 25 s; uma prancha de 30 MB leva 10 a 40 s e gera
+30 a 100 MB em `--lod alto`, 1 a 9 MB em `--lod medio`. Pico de memória observado: 3,3 GB por processo.
 
 ## Contribuindo
 
@@ -421,6 +466,10 @@ Detalhes que custaram caro (para quem for mexer no código):
 
 - A viewport `id=1` de cada layout **não é a folha**: é a janela do espaço do papel na tela do AutoCAD (pode ter
   metros). A folha vem de `PaperWidth`/`PaperHeight`/`PaperRotation`; as unidades do layout vêm de `PaperUnits`.
+- `Viewport.ViewCenter` é dado no sistema de exibição, cuja origem é `ViewTarget` (em WCS). Ignorar o alvo deixa a
+  viewport vazia quando o desenho está em coordenadas UTM.
+- A extensão de um layout pelas entidades é traiçoeira; `PlotType = Window` e `Layout.MinExtents/MaxExtents` são
+  o que o AutoCAD realmente plota.
 - `TextEntity.GetBoundingBox()` lança exceção no ACadSharp 3.7.1; a caixa dos textos é estimada aqui.
 - Arquivos reais trazem `MText.RectangleWidth = 2e-10`: largura de quebra menor que um caractere é lixo.
 - `Arc.CreateFromBulge` com vértices coincidentes produz NaN ou raio zero: bulge degenerado vira segmento reto.
@@ -428,6 +477,21 @@ Detalhes que custaram caro (para quem for mexer no código):
 - Textos em `Insert.Attributes` já vêm em coordenadas do espaço, não do bloco.
 - `TableEntity` herda de `Insert` e `AttributeEntity` de `TextEntity`: a ordem dos `case` importa.
 - PDFsharp 6.2 (build Core) não resolve fontes sozinho; `TextStyle.TrueType` é um enum de *flags*, não o nome da fonte.
+
+## Histórico de versões
+
+**1.1.0**
+- `--lod alto|medio|baixo`: simplificação da geometria (Douglas-Peucker, arcos, hachuras, arredondamento) sem tocar no texto; pranchas densas caem de 30–100 MB para 1–9 MB em `medio`.
+- `--cores original|texto|texto-preto|tudo|mono`: textos claros (amarelo, ciano) legíveis sobre o papel branco; padrão `texto`.
+- Viewports com alvo de vista (`ViewTarget`) fora da origem passaram a renderizar (antes saíam vazias em desenhos UTM).
+- Layouts enquadrados pela janela de plotagem ou pela extensão salva do layout, não pelas entidades.
+- WIPEOUT renderizado como máscara branca.
+- Fontes SHX mapeadas para Arial Narrow e MTEXT com compressão de até 15 % em vez de quebra: blocos de notas não invadem mais o carimbo.
+- Página do modelo segue a proporção do conteúdo (sem faixas em branco em desenhos alongados).
+- Teste de diagnóstico de layouts (`DWGPARAPDF_DIAG`) e 42 testes automatizados.
+
+**1.0.0**
+- Primeira versão: DWG/DXF para PDF vetorial (modelo + layouts com viewports), extração de texto em ordem de leitura, modos `desenho`, `texto` e `ambos`, CLI e biblioteca, pipeline com Releases para Windows, Linux e macOS.
 
 ## Licenças
 

@@ -21,6 +21,12 @@ internal static class Cli
                          ambos: páginas do desenho seguidas das páginas de texto
           --so-modelo    no modo desenho, só a página do espaço do modelo
           --so-layouts   no modo desenho, só as páginas dos layouts de papel
+          --cores        original | texto (padrão: textos claros demais escurecidos, geometria intacta)
+                         | texto-preto (todo texto preto, geometria intacta)
+                         | tudo (textos e geometria escurecidos) | mono (tudo preto, como monochrome.ctb)
+          --lod          nível de detalhe da geometria (o texto nunca é degradado):
+                         alto (padrão, fiel) | medio (polilinhas simplificadas a 0,3 pt, hachuras de padrão limitadas)
+                         | baixo (0,8 pt, hachuras de padrão viram preenchimento, entidades minúsculas somem)
           --txt          grava também um .txt (Markdown leve) com o texto extraído
           --tsv          grava também um .tsv com cada texto e sua posição (espaço, tipo, camada, x, y, altura)
           --sem-cotas    no texto extraído, ignora entidades DIMENSION
@@ -38,6 +44,8 @@ internal static class Cli
     {
         string? entrada = null, saida = null, nome = null;
         var modo = ModoSaida.Desenho;
+        var lod = NivelDetalhe.Alto;
+        var cores = ModoCores.Texto;
         var soModelo = false; var soLayouts = false;
         var gravarTxt = false; var gravarTsv = false; var semCotas = false; var verboso = false;
 
@@ -59,6 +67,14 @@ internal static class Cli
                 case "--modo":
                     if (++i >= args.Length) return Uso("Falta o valor de --modo.");
                     if (!Enum.TryParse(args[i], ignoreCase: true, out modo)) return Uso($"Modo inválido: {args[i]} (use desenho, texto ou ambos).");
+                    break;
+                case "--cores":
+                    if (++i >= args.Length) return Uso("Falta o valor de --cores.");
+                    if (!Enum.TryParse(args[i].Replace("-", string.Empty), ignoreCase: true, out cores)) return Uso($"Modo de cores inválido: {args[i]} (use original, texto, texto-preto, tudo ou mono).");
+                    break;
+                case "--lod":
+                    if (++i >= args.Length) return Uso("Falta o valor de --lod.");
+                    if (!Enum.TryParse(args[i], ignoreCase: true, out lod)) return Uso($"LOD inválido: {args[i]} (use alto, medio ou baixo).");
                     break;
                 case "--so-modelo": soModelo = true; break;
                 case "--so-layouts": soLayouts = true; break;
@@ -87,7 +103,7 @@ internal static class Cli
                 opcoes: new OpcoesConversao
                 {
                     Modo = modo,
-                    Desenho = new OpcoesDesenho { IncluirModelo = !soLayouts, IncluirLayouts = !soModelo },
+                    Desenho = new OpcoesDesenho { IncluirModelo = !soLayouts, IncluirLayouts = !soModelo, Lod = lod, Cores = cores },
                 });
 
             var fonte = entrada == "-"
@@ -110,7 +126,7 @@ internal static class Cli
                 await File.WriteAllTextAsync(Path.ChangeExtension(saida, ".tsv"), resultado.Documento.ParaTsv(), new UTF8Encoding(false), cts.Token);
 
             var d = resultado.Documento;
-            Console.WriteLine($"PDF gerado: {saida} ({resultado.Paginas} página(s), {resultado.Pdf.Length / 1024.0 / 1024.0:0.00} MB, modo {modo.ToString().ToLowerInvariant()})");
+            Console.WriteLine($"PDF gerado: {saida} ({resultado.Paginas} página(s), {resultado.Pdf.Length / 1024.0 / 1024.0:0.00} MB, modo {modo.ToString().ToLowerInvariant()}, lod {lod.ToString().ToLowerInvariant()})");
             if (gravarTxt) Console.WriteLine($"TXT gerado: {Path.ChangeExtension(saida, ".txt")}");
             if (gravarTsv) Console.WriteLine($"TSV gerado: {Path.ChangeExtension(saida, ".tsv")}");
             Console.WriteLine($"Formato {d.Versao}; {resultado.EntidadesDesenhadas} entidade(s) desenhada(s), {resultado.EntidadesComErro} com erro; " +

@@ -62,6 +62,54 @@ public class DesenhoTestes
     }
 
     [Fact]
+    public void Lod_reduz_geometria_e_preserva_texto()
+    {
+        var bytes = Amostra();
+        var alto = new ConversorDwgPdf(opcoes: new OpcoesConversao { Desenho = new OpcoesDesenho { Lod = NivelDetalhe.Alto } }).Converter(bytes, "a.dwg");
+        var medio = new ConversorDwgPdf(opcoes: new OpcoesConversao { Desenho = new OpcoesDesenho { Lod = NivelDetalhe.Medio } }).Converter(bytes, "a.dwg");
+        var baixo = new ConversorDwgPdf(opcoes: new OpcoesConversao { Desenho = new OpcoesDesenho { Lod = NivelDetalhe.Baixo } }).Converter(bytes, "a.dwg");
+
+        Assert.Equal(alto.Paginas, baixo.Paginas);
+        Assert.True(medio.Pdf.Length <= alto.Pdf.Length, $"medio {medio.Pdf.Length} > alto {alto.Pdf.Length}");
+        Assert.True(baixo.Pdf.Length <= medio.Pdf.Length, $"baixo {baixo.Pdf.Length} > medio {medio.Pdf.Length}");
+        Assert.Equal(alto.Documento.TotalTextos, baixo.Documento.TotalTextos); // texto nunca é degradado
+        Assert.Equal(0, baixo.EntidadesComErro);
+    }
+
+    [Theory]
+    [InlineData(255, 255, 0, true)]     // amarelo: escurece
+    [InlineData(0, 255, 255, true)]     // ciano: escurece
+    [InlineData(200, 200, 200, true)]   // cinza claro: escurece
+    [InlineData(255, 0, 0, false)]      // vermelho: mantém
+    [InlineData(0, 0, 255, false)]      // azul: mantém
+    [InlineData(0, 0, 0, false)]        // preto: mantém
+    public void Contrastar_escurece_so_cores_claras_mantendo_matiz(int r, int g, int b, bool deveEscurecer)
+    {
+        var original = PdfSharp.Drawing.XColor.FromArgb(r, g, b);
+        var ajustada = RenderizadorEntidades.Contrastar(original);
+
+        var lumOriginal = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+        var lumAjustada = 0.2126 * ajustada.R + 0.7152 * ajustada.G + 0.0722 * ajustada.B;
+        if (deveEscurecer)
+        {
+            Assert.True(lumAjustada < lumOriginal * 0.7, $"não escureceu: {ajustada.R},{ajustada.G},{ajustada.B}");
+            // matiz preservado: o canal dominante continua dominante
+            if (r == 255 && g == 255) Assert.True(ajustada.R == ajustada.G && ajustada.B < ajustada.R);
+            if (g == 255 && b == 255 && r == 0) Assert.True(ajustada.G == ajustada.B && ajustada.R < ajustada.G);
+        }
+        else
+            Assert.Equal((original.R, original.G, original.B), (ajustada.R, ajustada.G, ajustada.B));
+    }
+
+    [Fact]
+    public void Modo_mono_gera_pdf_valido()
+    {
+        var mono = new ConversorDwgPdf(opcoes: new OpcoesConversao { Desenho = new OpcoesDesenho { Cores = ModoCores.Mono } }).Converter(Amostra(), "a.dwg");
+        Assert.Equal(2, mono.Paginas);
+        Assert.Equal(0, mono.EntidadesComErro);
+    }
+
+    [Fact]
     public void Afim2D_compoe_na_ordem_certa()
     {
         // ponto local (1,0) num bloco escalado 2x, girado 90° e inserido em (10,10) => (10, 12)

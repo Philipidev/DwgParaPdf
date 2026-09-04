@@ -32,9 +32,15 @@ public class DiagnosticoLayoutsTestes
             sb.AppendLine($"   PaperViewport: {(pv is null ? "null" : $"id={pv.Id} papel={pv.RepresentsPaper} centro={pv.Center} W={pv.Width.ToString(ci)} H={pv.Height.ToString(ci)} viewCentro={pv.ViewCenter} viewH={pv.ViewHeight.ToString(ci)}")}");
             if (layout.AssociatedBlock is null) continue;
             foreach (var vp in layout.AssociatedBlock.Entities.OfType<Viewport>())
-                sb.AppendLine($"   Viewport id={vp.Id} papel={vp.RepresentsPaper} centro={vp.Center} W={vp.Width.ToString(ci)} H={vp.Height.ToString(ci)} viewCentro={vp.ViewCenter} viewH={vp.ViewHeight.ToString(ci)} twist={vp.TwistAngle.ToString(ci)} status={vp.Status} camada={vp.Layer?.Name}");
+                sb.AppendLine($"   Viewport id={vp.Id} papel={vp.RepresentsPaper} centro={vp.Center} W={vp.Width.ToString(ci)} H={vp.Height.ToString(ci)} viewCentro={vp.ViewCenter} viewH={vp.ViewHeight.ToString(ci)} alvo={vp.ViewTarget} dir={vp.ViewDirection} twist={vp.TwistAngle.ToString(ci)} congeladas={vp.FrozenLayers.Count} status={vp.Status} camada={vp.Layer?.Name} ligada={vp.Layer?.IsOn}");
+            sb.AppendLine($"   PlotWindow: ({layout.WindowLowerLeftX.ToString(ci)},{layout.WindowLowerLeftY.ToString(ci)}) - ({layout.WindowUpperLeftX.ToString(ci)},{layout.WindowUpperLeftY.ToString(ci)}) escalaImpressao={layout.PrintScale.ToString(ci)} ajustar={layout.ScaledFit}");
             var outros = layout.AssociatedBlock.Entities.Where(e => e is not Viewport).ToList();
             sb.AppendLine($"   Outras entidades: {outros.Count} ({string.Join(", ", outros.GroupBy(e => e.ObjectName).Select(g => $"{g.Key} x{g.Count()}"))})");
+            foreach (var m in outros.OfType<MText>().OrderByDescending(m => m.Value.Length).Take(4))
+            {
+                var limpo = LimpadorTextoCad.LimparMText(m.Value);
+                sb.AppendLine($"   MTEXT h={m.Height.ToString(ci)} larg={m.RectangleWidth.ToString(ci)} altCaixa={m.RectangleHeight.ToString(ci)} espac={m.LineSpacing.ToString(ci)} estiloEspac={m.LineSpacingStyle} fix={m.AttachmentPoint} colunas={m.HasColumns} estilo={m.Style?.Name}/{m.Style?.Filename} chars={m.Value.Length} linhasP={limpo.Count(c => c == '\n') + 1} inicio='{limpo.Replace('\n', '/')[..Math.Min(80, limpo.Length)]}'");
+            }
             double minX = double.MaxValue, minY = double.MaxValue, maxX = double.MinValue, maxY = double.MinValue;
             foreach (var e in outros)
             {
@@ -42,6 +48,8 @@ public class DiagnosticoLayoutsTestes
             }
             if (outros.Count > 0) sb.AppendLine($"   Extensão das entidades: ({minX.ToString(ci)},{minY.ToString(ci)}) - ({maxX.ToString(ci)},{maxY.ToString(ci)})");
         }
+
+        sb.AppendLine("Estilos de texto: " + string.Join("; ", doc.TextStyles.Select(t => $"{t.Name}={t.Filename}{(t.BigFontFilename is { Length: > 0 } b ? "+" + b : "")} w={t.Width.ToString(ci)} flags={t.TrueType}")));
 
         // maiores caixas estimadas de texto no modelo (para depurar extensão inflada)
         var estimadas = new List<(double Area, string Descricao)>();

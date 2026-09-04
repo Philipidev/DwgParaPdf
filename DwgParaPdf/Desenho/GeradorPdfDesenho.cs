@@ -7,8 +7,59 @@ using PdfSharp.Pdf;
 
 namespace DwgParaPdf.Desenho;
 
+/// <summary>Nível de detalhe da geometria. O texto é sempre preservado integralmente.</summary>
+public enum NivelDetalhe
+{
+    /// <summary>Fiel: só remove vértices coincidentes (padrão).</summary>
+    Alto,
+
+    /// <summary>Simplifica polilinhas a 0,3 pt, arcos com metade dos segmentos, hachuras de padrão com até 8 mil linhas, coordenadas com 1 decimal.</summary>
+    Medio,
+
+    /// <summary>Simplifica a 0,8 pt, arcos grosseiros, hachuras de padrão viram preenchimento translúcido, entidades menores que 0,8 pt somem.</summary>
+    Baixo,
+}
+
+/// <summary>Parâmetros concretos de cada nível de detalhe (em pontos da página).</summary>
+internal sealed record ParametrosLod(double ToleranciaPt, double PassoArcoPt, int LimiteLinhasHachura, double ArredondamentoPt, double MinimoEntidadePt)
+{
+    public ModoCores Cores { get; init; } = ModoCores.Texto;
+
+    public static ParametrosLod De(NivelDetalhe nivel, ModoCores cores = ModoCores.Texto) => (nivel switch
+    {
+        NivelDetalhe.Baixo => new ParametrosLod(0.8, 6.0, 0, 0.1, 0.8),
+        NivelDetalhe.Medio => new ParametrosLod(0.3, 3.0, 8_000, 0.1, 0.3),
+        _ => new ParametrosLod(0.02, 1.5, 40_000, 0, 0),
+    }) with { Cores = cores };
+}
+
+/// <summary>Tratamento das cores para papel branco (o AutoCAD desenha em fundo escuro; amarelo e ciano somem no branco).</summary>
+public enum ModoCores
+{
+    /// <summary>Cores do arquivo (só branco/índice 7 vira preto).</summary>
+    Original,
+
+    /// <summary>Textos claros demais são escurecidos mantendo o matiz; geometria intacta (padrão).</summary>
+    Texto,
+
+    /// <summary>Todo texto preto; geometria intacta.</summary>
+    TextoPreto,
+
+    /// <summary>Textos e geometria claros demais são escurecidos mantendo o matiz.</summary>
+    Tudo,
+
+    /// <summary>Tudo preto, como o monochrome.ctb do AutoCAD.</summary>
+    Mono,
+}
+
 public sealed class OpcoesDesenho
 {
+    /// <summary>Nível de detalhe da geometria (o texto nunca é degradado). Reduz o tamanho do PDF em desenhos densos.</summary>
+    public NivelDetalhe Lod { get; init; } = NivelDetalhe.Alto;
+
+    /// <summary>Como tratar cores claras sobre o papel branco.</summary>
+    public ModoCores Cores { get; init; } = ModoCores.Texto;
+
     /// <summary>Gera uma página com o espaço do modelo ajustado ao papel.</summary>
     public bool IncluirModelo { get; init; } = true;
 
@@ -49,6 +100,8 @@ internal static class GeradorPdfDesenho
 
         var pdf = new PdfDocument();
         pdf.Options.CompressContentStreams = true;
+        pdf.Options.FlateEncodeMode = PdfFlateEncodeMode.BestCompression;
+        var lod = ParametrosLod.De(opcoes.Lod, opcoes.Cores);
         pdf.Info.Title = nomeOrigem;
         pdf.Info.Subject = "Desenho CAD convertido em PDF vetorial";
         pdf.Info.Creator = "DwgParaPdf";
@@ -56,7 +109,7 @@ internal static class GeradorPdfDesenho
         var tiposNaoSuportados = new Dictionary<string, int>();
 
         if (opcoes.IncluirModelo)
-            PaginaModelo(pdf, doc, opcoes, avisos, stats, tiposNaoSuportados);
+            PaginaModelo(pdf, doc, opcoes, lod, avisos, stats, tiposNaoSuportados);
 
         if (opcoes.IncluirLayouts)
         {
@@ -64,7 +117,7 @@ internal static class GeradorPdfDesenho
             {
                 try
                 {
-                    PaginaLayout(pdf, doc, layout, opcoes, avisos, stats, tiposNaoSuportados);
+                    PaginaLayout(pdf, doc, layout, opcoes, lod, avisos, stats, tiposNaoSuportados);
                 }
                 catch (Exception ex) when (ex is not OutOfMemoryException)
                 {
@@ -92,14 +145,14 @@ internal static class GeradorPdfDesenho
 
     // ------------------------------------------------------------------ modelo
 
-    private static void PaginaModelo(PdfDocument pdf, CadDocument doc, OpcoesDesenho opcoes, List<string> avisos, EstatisticasDesenho stats, Dictionary<string, int> naoSuportados)
+    private static void PaginaModelo(PdfDocument pdf, CadDocument doc, OpcoesDesenho opcoes, ParametrosLod lod, List<string> avisos, EstatisticasDesenho stats, Dictionary<string, int> naoSuportados)
     {
         var entidades = doc.ModelSpace.Entities.Where(e => e is not Viewport).ToList();
         if (entidades.Count == 0) return;
 
         // renderizador provisório só para as regras de visibilidade das camadas
         using var sonda = XGraphics.CreateMeasureContext(new XSize(100, 100), XGraphicsUnit.Point, XPageDirection.Downwards);
-        var regras = new RenderizadorEntidades(sonda, doc, avisos);
+        var regras = new RenderizadorEntidades(sonda, doc, avisos, lod);
         var visiveis = entidades.Where(e => !e.IsInvisible && regras.CamadaVisivel(e.Layer, null)).ToList();
         if (visiveis.Count == 0) return;
 
@@ -112,15 +165,19 @@ internal static class GeradorPdfDesenho
         var paisagem = largura >= altura;
         var medianaTexto = MedianaAlturaTexto(visiveis);
 
-        double paginaW = 0, paginaH = 0, escalaMm = 0;
+        // escala: a menor folha ISO (A4..A0) em que o texto mediano fique legível; a página final segue a proporção
+        // do conteúdo dentro dessa folha (sem faixas em branco quando o desenho é muito alongado)
+        double escalaMm = 0;
         foreach (var papel in Papeis)
         {
-            paginaW = paisagem ? papel.AlturaMm : papel.LarguraMm;
-            paginaH = paisagem ? papel.LarguraMm : papel.AlturaMm;
-            escalaMm = Math.Min((paginaW - 2 * opcoes.MargemMm) / largura, (paginaH - 2 * opcoes.MargemMm) / altura);
+            var folhaW = paisagem ? papel.AlturaMm : papel.LarguraMm;
+            var folhaH = paisagem ? papel.LarguraMm : papel.AlturaMm;
+            escalaMm = Math.Min((folhaW - 2 * opcoes.MargemMm) / largura, (folhaH - 2 * opcoes.MargemMm) / altura);
             if (medianaTexto <= 0 && papel.Nome == "A3") break;
             if (medianaTexto > 0 && medianaTexto * escalaMm >= opcoes.AlturaTextoMinimaMm) break;
         }
+        var paginaW = Math.Max(largura * escalaMm + 2 * opcoes.MargemMm, 105);
+        var paginaH = Math.Max(altura * escalaMm + 2 * opcoes.MargemMm, 105);
 
         var pagina = pdf.AddPage();
         pagina.Width = XUnit.FromMillimeter(paginaW);
@@ -132,7 +189,7 @@ internal static class GeradorPdfDesenho
         var m = Afim2D.Pagina(escalaPt, deslocX - min.X * escalaPt, pagina.Height.Point - deslocY + min.Y * escalaPt);
 
         using var gfx = XGraphics.FromPdfPage(pagina);
-        var renderizador = new RenderizadorEntidades(gfx, doc, avisos);
+        var renderizador = new RenderizadorEntidades(gfx, doc, avisos, lod);
         renderizador.Desenhar(visiveis, new ContextoRender { M = m });
         Acumular(stats, renderizador, naoSuportados);
     }
@@ -299,7 +356,7 @@ internal static class GeradorPdfDesenho
 
     // ------------------------------------------------------------------ layouts
 
-    private static void PaginaLayout(PdfDocument pdf, CadDocument doc, Layout layout, OpcoesDesenho opcoes, List<string> avisos, EstatisticasDesenho stats, Dictionary<string, int> naoSuportados)
+    private static void PaginaLayout(PdfDocument pdf, CadDocument doc, Layout layout, OpcoesDesenho opcoes, ParametrosLod lod, List<string> avisos, EstatisticasDesenho stats, Dictionary<string, int> naoSuportados)
     {
         var bloco = layout.AssociatedBlock;
         if (bloco is null) return;
@@ -312,18 +369,39 @@ internal static class GeradorPdfDesenho
         var conteudo = entidades.Where(e => !ReferenceEquals(e, papelVp) && (e is not Viewport vp || viewportsAtivas.Contains(vp))).ToList();
         if (conteudo.Count == 0) return; // layout vazio
 
-        var extensao = ExtensaoLayout(conteudo);
-        if (extensao is null) return;
-        var (min, max) = extensao.Value;
-        var larguraConteudo = Math.Max(max.X - min.X, 1e-9);
-        var alturaConteudo = Math.Max(max.Y - min.Y, 1e-9);
-
         // unidades do espaço do papel → mm; folha declarada nas configurações de plotagem (sempre em mm)
         var unidadeMm = layout.PaperUnits == PlotPaperUnits.Inches ? 25.4 : 1.0;
         var girado = layout.PaperRotation is PlotRotation.Degrees90 or PlotRotation.Degrees270;
         var paperWmm = girado ? layout.PaperHeight : layout.PaperWidth;
         var paperHmm = girado ? layout.PaperWidth : layout.PaperHeight;
-        if (paperWmm <= 0 || paperHmm <= 0 || paperWmm > 6000 || paperHmm > 6000)
+        var folhaDeclarada = paperWmm > 0 && paperHmm > 0 && paperWmm <= 6000 && paperHmm <= 6000;
+
+        // região a enquadrar, na ordem de confiança: janela de plotagem (o que o usuário plota), extensão salva
+        // do layout (calculada pelo AutoCAD), e por fim as caixas das entidades visíveis (a menos confiável:
+        // MULTILEADER/WIPEOUT ilegíveis trazem caixas erradas)
+        using var sonda = XGraphics.CreateMeasureContext(new XSize(100, 100), XGraphicsUnit.Point, XPageDirection.Downwards);
+        var regras = new RenderizadorEntidades(sonda, doc, avisos, lod);
+        var visiveis = conteudo.Where(e => e is Viewport || (!e.IsInvisible && regras.CamadaVisivel(e.Layer, null))).ToList();
+        var limiteUnidades = (folhaDeclarada ? Math.Max(paperWmm, paperHmm) : 6000) / unidadeMm * 10; // região maior que 10 folhas é lixo
+
+        (XYZ Min, XYZ Max)? regiao = null;
+        var regiaoExata = false;
+        if (layout.PlotType == PlotType.Window && RegiaoValida(layout.WindowLowerLeftX, layout.WindowLowerLeftY, layout.WindowUpperLeftX, layout.WindowUpperLeftY, limiteUnidades, out var janela))
+        {
+            regiao = janela; regiaoExata = true;
+        }
+        else if (RegiaoValida(layout.MinExtents.X, layout.MinExtents.Y, layout.MaxExtents.X, layout.MaxExtents.Y, limiteUnidades, out var salva))
+        {
+            regiao = salva; regiaoExata = true;
+        }
+        regiao ??= ExtensaoLayout(visiveis) ?? ExtensaoLayout(conteudo);
+        if (regiao is null) return;
+
+        var (min, max) = regiao.Value;
+        var larguraConteudo = Math.Max(max.X - min.X, 1e-9);
+        var alturaConteudo = Math.Max(max.Y - min.Y, 1e-9);
+
+        if (!folhaDeclarada)
         {
             // sem folha utilizável: A1 na orientação do conteúdo
             var paisagem = larguraConteudo >= alturaConteudo;
@@ -354,7 +432,8 @@ internal static class GeradorPdfDesenho
         }
         else
         {
-            var margemPt = Math.Max(5, Math.Min(Math.Min(margem.Left, margem.Bottom), 20)) * PtPorMm;
+            // região exata (janela/extensão salva) preenche a folha; região estimada ganha uma margem
+            var margemPt = regiaoExata ? 0 : Math.Max(5, Math.Min(Math.Min(margem.Left, margem.Bottom), 20)) * PtPorMm;
             var escala = Math.Min((larguraPt - 2 * margemPt) / larguraConteudo, (alturaPt - 2 * margemPt) / alturaConteudo);
             var dx = (larguraPt - larguraConteudo * escala) / 2;
             var dy = (alturaPt - alturaConteudo * escala) / 2;
@@ -366,7 +445,7 @@ internal static class GeradorPdfDesenho
         pagina.Height = XUnit.FromPoint(alturaPt);
 
         using var gfx = XGraphics.FromPdfPage(pagina);
-        var renderizador = new RenderizadorEntidades(gfx, doc, avisos);
+        var renderizador = new RenderizadorEntidades(gfx, doc, avisos, lod);
         var ctxPapel = new ContextoRender { M = m };
         var modelo = doc.ModelSpace.Entities.Where(e => e is not Viewport).ToList();
 
@@ -389,6 +468,19 @@ internal static class GeradorPdfDesenho
 
     private static bool ViewportAtiva(Viewport vp)
         => vp.Width > 0 && vp.Height > 0 && vp.ViewHeight > 0 && !vp.Status.HasFlag(ViewportStatusFlags.ViewportOff);
+
+    /// <summary>Retângulo finito, com área e não absurdo (lado ≤ <paramref name="limite"/>), em qualquer ordem de cantos.</summary>
+    private static bool RegiaoValida(double x1, double y1, double x2, double y2, double limite, out (XYZ Min, XYZ Max) regiao)
+    {
+        regiao = default;
+        if (!double.IsFinite(x1) || !double.IsFinite(y1) || !double.IsFinite(x2) || !double.IsFinite(y2)) return false;
+        var minX = Math.Min(x1, x2); var maxX = Math.Max(x1, x2);
+        var minY = Math.Min(y1, y2); var maxY = Math.Max(y1, y2);
+        var w = maxX - minX; var h = maxY - minY;
+        if (w <= 1e-6 || h <= 1e-6 || w > limite || h > limite) return false;
+        regiao = (new XYZ(minX, minY, 0), new XYZ(maxX, maxY, 0));
+        return true;
+    }
 
     /// <summary>Extensão do conteúdo de um layout: entidades do papel mais os retângulos das viewports ativas.</summary>
     private static (XYZ Min, XYZ Max)? ExtensaoLayout(List<Entity> conteudo)
@@ -414,11 +506,13 @@ internal static class GeradorPdfDesenho
     {
         var escala = vp.Height / vp.ViewHeight; // unidades de papel por unidade de modelo
 
-        // modelo → papel: centraliza ViewCenter no centro da viewport, aplica giro (twist) e escala
+        // modelo → papel: o sistema de exibição (DCS) tem origem no alvo da vista (ViewTarget, em WCS) e pode estar
+        // girado (twist); ViewCenter é dado nesse sistema e cai no centro da viewport, com a escala altura/altura-da-vista
         var mVp = Afim2D.Translacao(vp.Center.X, vp.Center.Y)
             .Compor(Afim2D.Escala(escala, escala))
+            .Compor(Afim2D.Translacao(-vp.ViewCenter.X, -vp.ViewCenter.Y))
             .Compor(Afim2D.Rotacao(vp.TwistAngle))
-            .Compor(Afim2D.Translacao(-vp.ViewCenter.X, -vp.ViewCenter.Y));
+            .Compor(Afim2D.Translacao(-vp.ViewTarget.X, -vp.ViewTarget.Y));
         var m = ctxPapel.M.Compor(mVp);
 
         if (Math.Abs(vp.ViewDirection.Z) < 0.99 && (vp.ViewDirection.X != 0 || vp.ViewDirection.Y != 0 || vp.ViewDirection.Z != 0))
