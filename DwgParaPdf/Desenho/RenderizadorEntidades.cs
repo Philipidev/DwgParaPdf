@@ -242,6 +242,16 @@ internal sealed class RenderizadorEntidades
         }
         if (!p.IsClosed) pontos.Add(Ponto(vertices[n - 1]));
 
+        // Largura muito maior que a própria geometria é leitura corrompida (visto: "donut" de 0,4 unidades com largura 75,
+        // que virava um disco de 20 cm na prancha). Um donut legítimo tem largura ≈ diâmetro; limita a 2× a extensão.
+        if (larguraMax > 0)
+        {
+            double minX = double.MaxValue, minY = double.MaxValue, maxX = double.MinValue, maxY = double.MinValue;
+            foreach (var q in pontos) { minX = Math.Min(minX, q.X); maxX = Math.Max(maxX, q.X); minY = Math.Min(minY, q.Y); maxY = Math.Max(maxY, q.Y); }
+            var extensao = Math.Max(maxX - minX, maxY - minY);
+            if (double.IsFinite(extensao) && larguraMax > 2 * extensao) larguraMax = 2 * extensao;
+        }
+
         Tracar(pontos, p.IsClosed, e, ctx, larguraMax);
     }
 
@@ -847,10 +857,10 @@ internal sealed class RenderizadorEntidades
     private static XColor CorDe(Color c)
     {
         if (c.IsByLayer || c.IsByBlock) return XColors.Black;
-        if (!c.IsTrueColor && c.Index == 7) return XColors.Black; // branco/preto do AutoCAD plota preto
-        byte r = c.R, g = c.G, b = c.B;
-        if (r >= 250 && g >= 250 && b >= 250) return XColors.Black; // branco sobre papel branco
-        return XColor.FromArgb(r, g, b);
+        // Só a cor índice 7 ("branco/preto") plota preto no AutoCAD. Branco true color e índice 255 plotam brancos
+        // mesmo: são as máscaras de hachura sólida que escondem o que está atrás e têm de continuar invisíveis.
+        if (!c.IsTrueColor && c.Index == 7) return XColors.Black;
+        return XColor.FromArgb(c.R, c.G, c.B);
     }
 
     private static double EspessuraMm(Entity e, ContextoRender ctx)

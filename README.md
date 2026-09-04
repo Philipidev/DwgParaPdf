@@ -270,7 +270,8 @@ Para RAG e leitura, `texto` costuma bastar; `mono` é a escolha para impressão 
 | VIEWPORT (em layouts) | Modelo recortado ao retângulo ou ao contorno poligonal; alvo da vista (`ViewTarget`), centro, escala e *twist*; camadas congeladas por viewport; borda só se a camada da viewport for plotável |
 | WIPEOUT | Máscara branca na ordem de desenho do arquivo (esconde o que foi desenhado antes) |
 
-Propriedades: cores ACI e true color (índice 7 e branco puro plotam preto sobre o papel branco); espessuras de
+Propriedades: cores ACI e true color (só o índice 7 plota preto; branco true color e índice 255 ficam brancos,
+porque são as máscaras que escondem o que está atrás); espessuras de
 linha em mm (ByLayer/ByBlock/padrão 0,25 mm); tipos de linha tracejados com LTSCALE e escala da entidade;
 camadas desligadas, congeladas, não plotáveis e `Defpoints` não saem; fontes TrueType instaladas pelo nome do
 arquivo do estilo, negrito/itálico pelos *flags* do estilo; fontes SHX (simplex, romans, txt, isocp) saem em
@@ -475,10 +476,17 @@ Detalhes que custaram caro (para quem for mexer no código):
 - `Arc.CreateFromBulge` com vértices coincidentes produz NaN ou raio zero: bulge degenerado vira segmento reto.
 - A extensão salva no cabeçalho (`$EXTMIN/$EXTMAX`) inclui entidades perdidas; não a use para enquadrar.
 - Textos em `Insert.Attributes` já vêm em coordenadas do espaço, não do bloco.
+- `LwPolyline.ConstantWidth` pode vir corrompido em arquivos AutoCAD 2013 (largura 75 numa polilinha de 0,4 unidades);
+  com pontas arredondadas isso vira um disco enorme. Limite a largura pela extensão da geometria.
 - `TableEntity` herda de `Insert` e `AttributeEntity` de `TextEntity`: a ordem dos `case` importa.
 - PDFsharp 6.2 (build Core) não resolve fontes sozinho; `TextStyle.TrueType` é um enum de *flags*, não o nome da fonte.
 
 ## Histórico de versões
+
+**1.1.1**
+- Polilinha com largura maior que 2× a própria extensão (leitura corrompida: "donut" de 0,4 unidades com largura 75) virava um disco gigante na prancha; a largura agora é limitada a 2× a extensão.
+- Branco true color e índice 255 deixam de virar preto: são as máscaras de hachura sólida que escondem curvas de nível e apareciam como blocos pretos. Só a cor índice 7 plota preto, como no AutoCAD.
+- Diagnóstico: modo pasta (`DWGPARAPDF_DIAG=<pasta>`) conta larguras suspeitas por arquivo; despejo de hachuras com arestas curvas e de polilinhas mais largas.
 
 **1.1.0**
 - `--lod alto|medio|baixo`: simplificação da geometria (Douglas-Peucker, arcos, hachuras, arredondamento) sem tocar no texto; pranchas densas caem de 30–100 MB para 1–9 MB em `medio`.
