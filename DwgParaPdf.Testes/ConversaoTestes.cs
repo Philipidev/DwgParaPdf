@@ -137,9 +137,9 @@ public class ConversaoTestes
         Assert.Contains("NOTAS GERAIS\nConcreto fck = 30 MPa\nAço CA-50 1/2 Ø 12,5 mm", texto.Replace("\r\n", "\n"));
 
         // bloco: texto interno transformado pelo INSERT (200,0) + atributos na mesma linha do texto vizinho
-        Assert.Contains("CARIMBO-> | PROJETO: | BARRAGEM DO RIO VERDE", texto);
-        Assert.Contains("PBV-CIV-001-R2", texto);
-        Assert.Contains("CARIMBO [Model]: PROJETO = BARRAGEM DO RIO VERDE; DESENHO = PBV-CIV-001-R2", texto);
+        Assert.Contains("CARIMBO-> | PROJETO: | EDIFICIO EXEMPLO", texto);
+        Assert.Contains("PLANTA-01-R2", texto);
+        Assert.Contains("CARIMBO [Model]: PROJETO = EDIFICIO EXEMPLO; DESENHO = PLANTA-01-R2", texto);
 
         // layout de papel
         Assert.Contains("Layout: PRANCHA 01", texto);

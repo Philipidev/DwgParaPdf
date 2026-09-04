@@ -13,8 +13,8 @@ public static class AmostraDwg
     public const string TextoTitulo = "PLANTA BAIXA - NIVEL 100 %%d";
     public const string TextoEscala = "ESCALA 1:50";
     public const string MTextNotas = @"{\fArial|b1|i0|c0|p34;NOTAS GERAIS}\PConcreto fck = 30 MPa\PAço CA-50 \S1^2; %%c 12,5 mm";
-    public const string ValorProjeto = "BARRAGEM DO RIO VERDE";
-    public const string ValorDesenho = "PBV-CIV-001-R2";
+    public const string ValorProjeto = "EDIFICIO EXEMPLO";
+    public const string ValorDesenho = "PLANTA-01-R2";
     public const string NomeLayout = "PRANCHA 01";
     public const string TextoLayout = "PRANCHA 01 - PLANTA GERAL";
 

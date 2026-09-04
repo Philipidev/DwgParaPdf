@@ -29,8 +29,8 @@ internal static class Cli
           -h, --help     esta ajuda
 
         Exemplos:
-          DwgParaPdf "C:\projetos\PBV-CIV-001.dwg"
-          DwgParaPdf https://storage.exemplo.com/desenhos/PBV-CIV-001.dwg -o .\saida\PBV-CIV-001.pdf --modo ambos
+          DwgParaPdf "C:\desenhos\PLANTA-01.dwg"
+          DwgParaPdf https://storage.exemplo.com/desenhos/PLANTA-01.dwg -o .\saida\PLANTA-01.pdf --modo ambos
           type desenho.dwg | DwgParaPdf - --nome desenho.dwg --txt
         """;
 

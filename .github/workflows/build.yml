@@ -1,0 +1,162 @@
+name: build
+
+# Compila, testa e publica executáveis prontos para baixar:
+#  - a cada push/PR: artefatos do workflow (exigem login no GitHub para baixar)
+#  - a cada tag v*: uma Release com os mesmos pacotes anexados (download público, sem login)
+#  - manualmente: "Run workflow" na aba Actions
+
+on:
+  push:
+    branches: [main, master]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write   # necessário para criar a Release
+
+env:
+  DOTNET_NOLOGO: true
+  DOTNET_CLI_TELEMETRY_OPTOUT: true
+  DOTNET_SKIP_FIRST_TIME_EXPERIENCE: true
+
+jobs:
+  testes:
+    name: Testes (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+
+      # em Linux o PDF precisa de uma fonte TrueType (ver README > Fontes)
+      - name: Instalar fontes livres (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update -q && sudo apt-get install -y -q fonts-dejavu-core fonts-liberation
+
+      - run: dotnet restore DwgParaPdf.sln
+      - run: dotnet build DwgParaPdf.sln -c Release --no-restore
+      - run: dotnet test DwgParaPdf.sln -c Release --no-build --logger "trx;LogFileName=testes.trx"
+
+      - name: Guardar resultado dos testes
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: resultados-testes-${{ matrix.os }}
+          path: "**/TestResults/*.trx"
+          retention-days: 14
+
+  publicar:
+    name: Publicar ${{ matrix.nome }}
+    needs: testes
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Windows: um único .exe, sem precisar instalar .NET
+          - nome: win-x64-contido
+            rid: win-x64
+            contido: true
+            fontes: false
+          # Windows: .exe + DLLs, precisa do runtime .NET 10 instalado (pacote menor)
+          - nome: win-x64-com-dlls
+            rid: win-x64
+            contido: false
+            fontes: false
+          # Linux: binário único + fonte DejaVu na pasta "fontes" (obrigatória fora do Windows)
+          - nome: linux-x64-contido
+            rid: linux-x64
+            contido: true
+            fontes: true
+          # macOS Apple Silicon: binário único + fonte
+          - nome: osx-arm64-contido
+            rid: osx-arm64
+            contido: true
+            fontes: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Definir versão
+        id: versao
+        shell: bash
+        run: |
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            echo "valor=${GITHUB_REF#refs/tags/v}" >> "$GITHUB_OUTPUT"
+          else
+            echo "valor=0.0.${GITHUB_RUN_NUMBER}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: dotnet publish
+        shell: bash
+        run: |
+          set -euo pipefail
+          SAIDA="publish/DwgParaPdf-${{ steps.versao.outputs.valor }}-${{ matrix.nome }}"
+          if [[ "${{ matrix.contido }}" == "true" ]]; then
+            dotnet publish DwgParaPdf/DwgParaPdf.csproj -c Release -r ${{ matrix.rid }} \
+              --self-contained true \
+              -p:PublishSingleFile=true \
+              -p:IncludeNativeLibrariesForSelfExtract=true \
+              -p:EnableCompressionInSingleFile=true \
+              -p:DebugType=none \
+              -p:Version=${{ steps.versao.outputs.valor }} \
+              -o "$SAIDA"
+          else
+            dotnet publish DwgParaPdf/DwgParaPdf.csproj -c Release -r ${{ matrix.rid }} \
+              --self-contained false \
+              -p:DebugType=none \
+              -p:Version=${{ steps.versao.outputs.valor }} \
+              -o "$SAIDA"
+          fi
+          cp README.md "$SAIDA/"
+          [ -f LICENSE ] && cp LICENSE "$SAIDA/" || true
+          echo "saida=$SAIDA" >> "$GITHUB_ENV"
+
+      - name: Incluir fonte livre (Linux/macOS)
+        if: matrix.fontes == true
+        run: |
+          sudo apt-get update -q && sudo apt-get install -y -q fonts-dejavu-core
+          mkdir -p "$saida/fontes"
+          cp /usr/share/fonts/truetype/dejavu/DejaVuSans.ttf "$saida/fontes/"
+          cp /usr/share/doc/fonts-dejavu-core/copyright "$saida/fontes/LICENCA-DejaVu.txt" || true
+
+      - name: Empacotar
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd publish
+          NOME="$(basename "$saida")"
+          if [[ "${{ matrix.rid }}" == win-* ]]; then
+            zip -qr "$NOME.zip" "$NOME"
+            echo "pacote=publish/$NOME.zip" >> "$GITHUB_ENV"
+          else
+            tar -czf "$NOME.tar.gz" "$NOME"
+            echo "pacote=publish/$NOME.tar.gz" >> "$GITHUB_ENV"
+          fi
+          ls -la
+
+      - name: Artefato do workflow
+        uses: actions/upload-artifact@v4
+        with:
+          name: DwgParaPdf-${{ matrix.nome }}
+          path: ${{ env.pacote }}
+          retention-days: 90
+          if-no-files-found: error
+
+      - name: Anexar à Release (só em tag v*)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ env.pacote }}
+          generate_release_notes: true
+          fail_on_unmatched_files: true
