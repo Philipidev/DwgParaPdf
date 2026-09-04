@@ -1,0 +1,49 @@
+# Build
+bin/
+obj/
+out/
+publish/
+*.binlog
+
+# Visual Studio / Rider / VS Code
+.vs/
+.idea/
+.vscode/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+*.swp
+*.DotSettings.user
+
+# Testes e cobertura
+TestResults/
+coverage*/
+*.trx
+*.coverage
+*.coveragexml
+
+# NuGet
+*.nupkg
+*.snupkg
+packages/
+project.lock.json
+
+# Artefatos locais de conversão (saídas geradas ao rodar a CLI na pasta do projeto)
+*.pdf
+*.txt
+*.tsv
+!README.md
+!docs/**
+
+# Fontes TrueType colocadas para uso em Linux (não redistribuir fontes proprietárias)
+fontes/
+
+# Sistema operacional
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Diagnóstico
+*.layouts.txt
+*.log
